@@ -3,13 +3,16 @@
 if(!isset($_GET['pid'])) die("Brak ID pokoju");
 $pid = $_GET['pid'];
 
-// Pobranie danych pokoju
 $pokoj = $conn->query("SELECT p.*, h.nazwa FROM pokoje p JOIN hotele h ON p.hotel_id=h.hotel_id WHERE id_pokoj=$pid")->fetch();
 
-// Pobranie ZAJĘTYCH terminów (przyszłych)
+// POPRAWKA: Zmieniono 'status != anulowana' na 'status NOT LIKE anulowana%'
+// Dzięki temu 'anulowana_pozno' też jest traktowana jako wolny termin.
 $sql = "SELECT rezerwacja_od, rezerwacja_do FROM rezerwacje 
-        WHERE id_pokoj = ? AND status != 'anulowana' AND rezerwacja_do >= CURRENT_DATE 
+        WHERE id_pokoj = ? 
+        AND status NOT LIKE 'anulowana%' 
+        AND rezerwacja_do >= CURRENT_DATE 
         ORDER BY rezerwacja_od ASC";
+        
 $stmt = $conn->prepare($sql);
 $stmt->execute([$pid]);
 $zajete = $stmt->fetchAll();

@@ -1,5 +1,5 @@
 -- =================================================================
--- 1. CZYSZCZENIE BAZY (RESET CAŁKOWITY)
+-- 1. CZYSZCZENIE BAZY (RESET CAŁKOWITY - DROP ALL)
 -- =================================================================
 DROP VIEW IF EXISTS raport_przychodow CASCADE;
 
@@ -19,7 +19,7 @@ DROP FUNCTION IF EXISTS loguj_zmiane_statusu CASCADE;
 DROP FUNCTION IF EXISTS sprawdz_blokade_klienta CASCADE;
 DROP FUNCTION IF EXISTS loguj_zmiane_statusu_json CASCADE;
 DROP FUNCTION IF EXISTS dokonaj_rezerwacji CASCADE;
-DROP FUNCTION IF EXISTS symuluj_cene_rezerwacji CASCADE; -- Nowa funkcja
+DROP FUNCTION IF EXISTS symuluj_cene_rezerwacji CASCADE;
 DROP FUNCTION IF EXISTS anuluj_rezerwacje_klienta CASCADE;
 
 -- Usuwanie tabel
@@ -35,7 +35,7 @@ DROP TABLE IF EXISTS konfiguracja CASCADE;
 DROP TABLE IF EXISTS progi_zajetosci CASCADE;
 
 -- =================================================================
--- 2. TWORZENIE STRUKTURY DANYCH
+-- 2. TWORZENIE STRUKTURY DANYCH (TABELE)
 -- =================================================================
 
 -- A. Konfiguracja (Zmienne globalne - brak hardcodowania)
@@ -45,7 +45,7 @@ CREATE TABLE konfiguracja (
     opis TEXT
 );
 
--- B. Yield Management (Zasady dynamicznych cen)
+-- B. Yield Management (Zasady dynamicznych cen wg zajętości)
 CREATE TABLE progi_zajetosci (
     id SERIAL PRIMARY KEY,
     procent_od INT,
@@ -63,7 +63,7 @@ CREATE TABLE hotele (
     mnoznik_zima NUMERIC(4, 2) DEFAULT 1.00
 );
 
--- D. Użytkownicy (Role i Managerowie)
+-- D. Użytkownicy (Role, Blokady, Managerowie)
 CREATE TABLE uzytkownik (
     id_uzytkownika SERIAL PRIMARY KEY,
     imie VARCHAR(50),
@@ -96,7 +96,7 @@ CREATE TABLE rezerwacje (
     rezerwacja_do DATE,
     liczba_dzieci INTEGER,
     cena_ostateczna NUMERIC(10, 2),
-    status VARCHAR(20) DEFAULT 'potwierdzona',
+    status VARCHAR(20) DEFAULT 'potwierdzona', -- Statusy: potwierdzona, anulowana, anulowana_pozno, zrealizowana, oczekujaca
     data_utworzenia TIMESTAMP DEFAULT NOW()
 );
 
@@ -109,7 +109,7 @@ CREATE TABLE platnosci (
     rabat NUMERIC(10, 2) DEFAULT 0
 );
 
--- H. Logi SQL (Klasyczne)
+-- H. Logi SQL (Klasyczne - Relacyjne)
 CREATE TABLE logi_systemowe (
     id_logu SERIAL PRIMARY KEY,
     id_rezerwacji INTEGER,
@@ -187,7 +187,7 @@ SELECT 2, 1, '2023-01-01', '2023-01-03', 'zrealizowana' FROM generate_series(1, 
 -- 4. LOGIKA BIZNESOWA (FUNKCJE I PROCEDURY)
 -- =================================================================
 
--- FUNKCJA 1: Dokonaj Rezerwacji (Zapisuje dane)
+-- FUNKCJA 1: Dokonaj Rezerwacji (Główny silnik logiczny)
 CREATE OR REPLACE FUNCTION dokonaj_rezerwacji(
     p_uid INT, p_pid INT, p_od DATE, p_do DATE, p_dzieci INT
 ) RETURNS TEXT AS $$
@@ -221,7 +221,7 @@ BEGIN
     IF v_cena IS NULL THEN RETURN 'Błąd: Brak pokoju.'; END IF;
     IF p_dzieci > v_max_dzieci THEN RETURN 'Błąd: Za dużo dzieci.'; END IF;
 
-    -- Dostępność
+    -- Dostępność (POPRAWIONO: Ignoruje anulowana i anulowana_pozno)
     SELECT COUNT(*) INTO v_konflikt FROM rezerwacje 
     WHERE id_pokoj = p_pid AND status NOT LIKE 'anulowana%' 
     AND ((rezerwacja_od < p_do AND rezerwacja_do > p_od) OR (rezerwacja_do + INTERVAL '1 day' >= p_od AND rezerwacja_od < p_do));
@@ -250,197 +250,4 @@ BEGIN
     IF v_miesiac IN (6, 7, 8) THEN 
         IF v_hotel_lato != 1.00 THEN v_cena := v_cena * v_hotel_lato; v_msg_info := v_msg_info || ' (Sezon Lato)'; END IF;
     ELSIF v_miesiac IN (1, 2, 12) THEN 
-        IF v_hotel_zima != 1.00 THEN v_cena := v_cena * v_hotel_zima; v_msg_info := v_msg_info || ' (Sezon Zima)'; END IF;
-    END IF;
-
-    v_total := (p_do - p_od) * v_cena;
-
-    -- Lojalność
-    SELECT COUNT(*) INTO v_historia FROM rezerwacje WHERE id_uzytkownika = p_uid AND status NOT LIKE 'anulowana%';
-    IF v_historia >= cfg_prog THEN
-        v_rabat := v_total * cfg_rabat_proc;
-        v_total := v_total - v_rabat;
-        v_msg_info := v_msg_info || ' (Rabat stałego klienta!)';
-    END IF;
-
-    -- Zapis
-    INSERT INTO rezerwacje (id_uzytkownika, id_pokoj, rezerwacja_od, rezerwacja_do, liczba_dzieci, cena_ostateczna)
-    VALUES (p_uid, p_pid, p_od, p_do, p_dzieci, v_total) RETURNING id_rezerwacji INTO v_new_id;
-    INSERT INTO platnosci (id_rezerwacji, kwota, rabat) VALUES (v_new_id, v_total, v_rabat);
-
-    RETURN 'Sukces! Rez nr ' || v_new_id || '. Kwota: ' || ROUND(v_total, 2) || ' PLN' || v_msg_info;
-END;
-$$ LANGUAGE plpgsql;
-
--- FUNKCJA 2: Symulacja Ceny (Tylko pokazuje koszt, nie zapisuje)
-CREATE OR REPLACE FUNCTION symuluj_cene_rezerwacji(
-    p_uid INT, p_pid INT, p_od DATE, p_do DATE
-) RETURNS TEXT AS $$
-DECLARE
-    v_cena NUMERIC; v_total NUMERIC; 
-    v_historia INT; v_rabat NUMERIC := 0; v_msg_info TEXT := ''; v_miesiac INT;
-    cfg_lato NUMERIC; cfg_zima NUMERIC; cfg_prog INT; cfg_rabat_proc NUMERIC;
-    v_hotel_id INT; v_hotel_lato NUMERIC; v_hotel_zima NUMERIC;
-    v_total_pokoje INT; v_zajete_pokoje INT; v_procent_zajetosci INT; 
-    v_mnoznik_dyn NUMERIC; v_opis_dyn VARCHAR;
-BEGIN
-    SELECT wartosc INTO cfg_prog FROM konfiguracja WHERE klucz='lojalnosc_prog';
-    SELECT wartosc INTO cfg_rabat_proc FROM konfiguracja WHERE klucz='lojalnosc_rabat';
-
-    SELECT p.cena_doba, h.hotel_id, h.mnoznik_lato, h.mnoznik_zima INTO v_cena, v_hotel_id, v_hotel_lato, v_hotel_zima
-    FROM pokoje p JOIN hotele h ON p.hotel_id = h.hotel_id WHERE p.id_pokoj = p_pid;
-
-    -- Yield
-    SELECT COUNT(*) INTO v_total_pokoje FROM pokoje WHERE hotel_id = v_hotel_id;
-    SELECT COUNT(DISTINCT r.id_pokoj) INTO v_zajete_pokoje 
-    FROM rezerwacje r JOIN pokoje p ON r.id_pokoj = p.id_pokoj
-    WHERE p.hotel_id = v_hotel_id AND r.status NOT LIKE 'anulowana%'
-    AND (r.rezerwacja_od < p_do AND r.rezerwacja_do > p_od);
-    
-    IF v_total_pokoje > 0 THEN v_procent_zajetosci := (v_zajete_pokoje::NUMERIC / v_total_pokoje::NUMERIC) * 100;
-    ELSE v_procent_zajetosci := 0; END IF;
-
-    SELECT mnoznik, opis INTO v_mnoznik_dyn, v_opis_dyn FROM progi_zajetosci 
-    WHERE v_procent_zajetosci BETWEEN procent_od AND procent_do LIMIT 1;
-
-    IF v_mnoznik_dyn IS NOT NULL AND v_mnoznik_dyn != 1.00 THEN
-        v_cena := v_cena * v_mnoznik_dyn;
-        v_msg_info := v_msg_info || '<br>• Dynamika: ' || v_opis_dyn;
-    END IF;
-
-    -- Sezon
-    v_miesiac := EXTRACT(MONTH FROM p_od);
-    IF v_miesiac IN (6, 7, 8) AND v_hotel_lato != 1.00 THEN 
-        v_cena := v_cena * v_hotel_lato; v_msg_info := v_msg_info || '<br>• Sezon: Lato';
-    ELSIF v_miesiac IN (1, 2, 12) AND v_hotel_zima != 1.00 THEN 
-        v_cena := v_cena * v_hotel_zima; v_msg_info := v_msg_info || '<br>• Sezon: Zima';
-    END IF;
-
-    v_total := (p_do - p_od) * v_cena;
-
-    -- Rabat
-    SELECT COUNT(*) INTO v_historia FROM rezerwacje WHERE id_uzytkownika = p_uid AND status NOT LIKE 'anulowana%';
-    IF v_historia >= cfg_prog THEN
-        v_rabat := v_total * cfg_rabat_proc;
-        v_total := v_total - v_rabat;
-        v_msg_info := v_msg_info || '<br>• Rabat stałego klienta (-' || (cfg_rabat_proc*100) || '%)';
-    END IF;
-
-    RETURN '<b>' || ROUND(v_total, 2) || ' PLN</b> <small>' || v_msg_info || '</small>';
-END;
-$$ LANGUAGE plpgsql;
-
--- FUNKCJA 3: Anulowanie z Konfiguracją
-CREATE OR REPLACE FUNCTION anuluj_rezerwacje_klienta(p_id_rez INT, p_id_user INT) RETURNS TEXT AS $$
-DECLARE
-    v_start DATE; v_stat VARCHAR; v_cena NUMERIC; v_dni INT; v_kara NUMERIC;
-    cfg_dni INT; cfg_kara_proc NUMERIC;
-BEGIN
-    SELECT wartosc INTO cfg_dni FROM konfiguracja WHERE klucz='anulowanie_limit_dni';
-    SELECT wartosc INTO cfg_kara_proc FROM konfiguracja WHERE klucz='anulowanie_kara_proc';
-
-    SELECT rezerwacja_od, status, cena_ostateczna INTO v_start, v_stat, v_cena
-    FROM rezerwacje WHERE id_rezerwacji = p_id_rez AND id_uzytkownika = p_id_user;
-
-    IF v_stat NOT IN ('potwierdzona', 'oczekujaca') THEN RETURN 'Błąd: Nie można anulować.'; END IF;
-
-    v_dni := v_start - CURRENT_DATE;
-
-    IF v_dni >= cfg_dni THEN
-        UPDATE rezerwacje SET status = 'anulowana' WHERE id_rezerwacji = p_id_rez;
-        UPDATE platnosci SET status = 'zwrocona', kwota = 0 WHERE id_rezerwacji = p_id_rez;
-        RETURN 'Sukces! Anulowano bezkosztowo.';
-    ELSE
-        v_kara := v_cena * cfg_kara_proc;
-        UPDATE rezerwacje SET status = 'anulowana_pozno' WHERE id_rezerwacji = p_id_rez;
-        UPDATE platnosci SET status = 'kara_umowna', kwota = v_kara WHERE id_rezerwacji = p_id_rez;
-        RETURN 'Anulowano późno. Naliczono karę: ' || v_kara || ' PLN.';
-    END IF;
-END;
-$$ LANGUAGE plpgsql;
-
--- =================================================================
--- 5. TRIGGERY (AUTOMATYZACJA I AUDYT)
--- =================================================================
-
--- T1: Walidacja Dat
-CREATE OR REPLACE FUNCTION waliduj_daty_rezerwacji() RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.rezerwacja_do <= NEW.rezerwacja_od THEN RAISE EXCEPTION 'Data wyjazdu musi być późniejsza niż przyjazdu!'; END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-CREATE TRIGGER trg_walidacja_dat BEFORE INSERT OR UPDATE ON rezerwacje FOR EACH ROW EXECUTE FUNCTION waliduj_daty_rezerwacji();
-
--- T2: Auto-Płatność
-CREATE OR REPLACE FUNCTION auto_status_rezerwacji() RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.status = 'oplacona' AND OLD.status != 'oplacona' THEN
-        UPDATE rezerwacje SET status = 'oplacona' WHERE id_rezerwacji = NEW.id_rezerwacji;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-CREATE TRIGGER trg_auto_oplacenie AFTER UPDATE ON platnosci FOR EACH ROW EXECUTE FUNCTION auto_status_rezerwacji();
-
--- T3: Blokada Usera (Security)
-CREATE OR REPLACE FUNCTION sprawdz_blokade_klienta() RETURNS TRIGGER AS $$
-DECLARE v_zablokowany BOOLEAN;
-BEGIN
-    SELECT czy_zablokowany INTO v_zablokowany FROM uzytkownik WHERE id_uzytkownika = NEW.id_uzytkownika;
-    IF v_zablokowany THEN RAISE EXCEPTION 'BLOKADA: Konto zablokowane.'; END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-CREATE TRIGGER trg_blokada_bezpieczenstwa BEFORE INSERT ON rezerwacje FOR EACH ROW EXECUTE FUNCTION sprawdz_blokade_klienta();
-
--- T4: Logi SQL (Klasyczne)
-CREATE OR REPLACE FUNCTION loguj_zmiane_statusu() RETURNS TRIGGER AS $$
-BEGIN
-    IF OLD.status IS DISTINCT FROM NEW.status THEN
-        INSERT INTO logi_systemowe (id_rezerwacji, stary_status, nowy_status, komunikat) 
-        VALUES (NEW.id_rezerwacji, OLD.status, NEW.status, 'Zmiana statusu');
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-CREATE TRIGGER trg_loguj_zmiany AFTER UPDATE ON rezerwacje FOR EACH ROW EXECUTE FUNCTION loguj_zmiane_statusu();
-
--- T5: Logi NoSQL / JSONB (Implementacja Modelu Nierelacyjnego)
-CREATE OR REPLACE FUNCTION loguj_zmiane_statusu_json() RETURNS TRIGGER AS $$
-DECLARE v_json JSONB;
-BEGIN
-    IF OLD.status IS DISTINCT FROM NEW.status THEN
-        v_json := json_build_object(
-            'typ', 'zmiana_statusu', 
-            'id_rezerwacji', NEW.id_rezerwacji,
-            'szczegoly', json_build_object(
-                'stary', OLD.status, 
-                'nowy', NEW.status, 
-                'uzytkownik_id', NEW.id_uzytkownika
-            )
-        );
-        INSERT INTO logi_nosql (dokument_json) VALUES (v_json);
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-CREATE TRIGGER trg_loguj_zmiany_json AFTER UPDATE ON rezerwacje FOR EACH ROW EXECUTE FUNCTION loguj_zmiane_statusu_json();
-
--- T6: Archiwizacja (Soft Delete)
-CREATE OR REPLACE FUNCTION archiwizuj_przed_usunieciem() RETURNS TRIGGER AS $$
-BEGIN
-    INSERT INTO archiwum_uzytkownikow (id_starego_uzytkownika, email, powod) VALUES (OLD.id_uzytkownika, OLD.email, 'Usunięty');
-    RETURN OLD;
-END;
-$$ LANGUAGE plpgsql;
-CREATE TRIGGER trg_archiwizacja_usera BEFORE DELETE ON uzytkownik FOR EACH ROW EXECUTE FUNCTION archiwizuj_przed_usunieciem();
-
--- =================================================================
--- 6. WIDOKI (REPORTING)
--- =================================================================
-CREATE OR REPLACE VIEW raport_przychodow AS
-SELECT h.nazwa AS Hotel, p.typ_pokoju AS Typ, COUNT(r.id_rezerwacji) AS Liczba_Rezerwacji, SUM(r.cena_ostateczna) AS Laczny_Zysk
-FROM rezerwacje r JOIN pokoje p ON r.id_pokoj = p.id_pokoj JOIN hotele h ON p.hotel_id = h.hotel_id
-WHERE r.status NOT LIKE 'anulowana%'
-GROUP BY h.nazwa, p.typ_pokoju ORDER BY Laczny_Zysk DESC;
+        IF v_hotel_zima != 1.00 THEN v_cena := v_cena * v_hotel_zima
