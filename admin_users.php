@@ -4,11 +4,11 @@ session_start(); include 'db.php';
 // Ochrona: Tylko admin ma tu wstęp
 if ($_SESSION['rola'] != 'admin') die("Brak dostępu");
 
-// Pobranie listy hoteli do formularzy (dla selecta przy tworzeniu managera)
+// Pobranie listy hoteli do formularzy
 $hotele = $conn->query("SELECT hotel_id, nazwa FROM hotele")->fetchAll();
 
 // =========================================================
-// 1. OBSŁUGA FORMULARZY (POST - Zapisywanie zmian)
+// 1. OBSŁUGA FORMULARZY
 // =========================================================
 
 // Tworzenie nowego usera
@@ -18,10 +18,10 @@ if (isset($_POST['create_user'])) {
         $stmt = $conn->prepare("INSERT INTO uzytkownik (imie, nazwisko, email, haslo, rola, manager_hotel_id) VALUES (?, ?, ?, ?, ?, ?)");
         $stmt->execute([$_POST['imie'], $_POST['nazwisko'], $_POST['email'], $_POST['haslo'], $_POST['rola'], $hotel_id]);
         echo "<script>alert('Utworzono nowego użytkownika!');</script>";
-    } catch (Exception $e) { echo "<script>alert('Błąd: Email zajęty!');</script>"; }
+    } catch (Exception $e) { echo "<script>alert('Błąd: Email jest już zajęty!');</script>"; }
 }
 
-// Blokowanie / Odblokowywanie
+// Blokowanie
 if (isset($_POST['toggle_block_id'])) {
     $conn->prepare("UPDATE uzytkownik SET czy_zablokowany = NOT czy_zablokowany WHERE id_uzytkownika = ?")->execute([$_POST['toggle_block_id']]);
 }
@@ -39,31 +39,25 @@ if (isset($_POST['assign_hotel'])) {
 }
 
 // =========================================================
-// 2. LOGIKA WYSZUKIWANIA (GET - Filtrowanie)
+// 2. LOGIKA WYSZUKIWANIA
 // =========================================================
-$where = "1=1"; // Domyślnie pokaż wszystko
+$where = "1=1"; 
 $params = [];
 
-// A. Szukanie po tekście (Imie, Nazwisko, Email)
 if (!empty($_GET['q'])) {
     $where .= " AND (imie ILIKE ? OR nazwisko ILIKE ? OR email ILIKE ?)";
     $txt = "%" . $_GET['q'] . "%";
     $params[] = $txt; $params[] = $txt; $params[] = $txt;
 }
-
-// B. Filtrowanie po Roli
 if (!empty($_GET['r'])) {
     $where .= " AND rola = ?";
     $params[] = $_GET['r'];
 }
-
-// C. Filtrowanie po Statusie (Aktywny / Zablokowany)
 if (!empty($_GET['s'])) {
     if($_GET['s'] == 'blocked') $where .= " AND czy_zablokowany = TRUE";
     if($_GET['s'] == 'active')  $where .= " AND czy_zablokowany = FALSE";
 }
 
-// Główne zapytanie z filtrami
 $sql = "SELECT u.*, h.nazwa as hotel_nazwa 
         FROM uzytkownik u 
         LEFT JOIN hotele h ON u.manager_hotel_id = h.hotel_id 
@@ -84,7 +78,7 @@ $users = $stmt->fetchAll();
     <a href="admin.php">Wróć do Panelu</a>
 </div>
 
-<div class="box" style="max-width:1100px;">
+<div class="box" style="max-width:1200px;">
     
     <div style="background: #eef; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ccd;">
         <h3 style="margin-top:0;">+ Stwórz Nowe Konto</h3>
@@ -112,14 +106,13 @@ $users = $stmt->fetchAll();
         </form>
     </div>
 
-    <form method="GET" style="background: #003580; padding: 15px; border-radius: 8px; display: flex; gap: 10px; align-items: flex-end; margin-bottom: 20px;">
-        <div style="flex:1;">
-            <label style="color:white; font-size:12px;">Szukaj (Email, Imię, Nazwisko):</label>
-            <input type="text" name="q" value="<?php echo $_GET['q'] ?? ''; ?>" placeholder="Wpisz frazę..." style="margin:0;">
+    <form method="GET" style="background: #003580; padding: 15px; border-radius: 8px; display: flex; gap: 10px; align-items: flex-end; margin-bottom: 20px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:200px;">
+            <label style="color:white; font-size:12px;">Szukaj:</label>
+            <input type="text" name="q" value="<?php echo $_GET['q'] ?? ''; ?>" placeholder="Email, Imię, Nazwisko..." style="margin:0;">
         </div>
-        
         <div style="width:150px;">
-            <label style="color:white; font-size:12px;">Filtruj Rolę:</label>
+            <label style="color:white; font-size:12px;">Rola:</label>
             <select name="r" style="margin:0;">
                 <option value="">Wszyscy</option>
                 <option value="klient" <?php if(($_GET['r']??'')=='klient') echo 'selected'; ?>>Klienci</option>
@@ -127,7 +120,6 @@ $users = $stmt->fetchAll();
                 <option value="admin" <?php if(($_GET['r']??'')=='admin') echo 'selected'; ?>>Admini</option>
             </select>
         </div>
-
         <div style="width:150px;">
             <label style="color:white; font-size:12px;">Status:</label>
             <select name="s" style="margin:0;">
@@ -136,13 +128,12 @@ $users = $stmt->fetchAll();
                 <option value="blocked" <?php if(($_GET['s']??'')=='blocked') echo 'selected'; ?>>Zablokowani</option>
             </select>
         </div>
-
         <button class="btn btn-green" style="height:42px; margin:0;">SZUKAJ</button>
         <a href="admin_users.php" class="btn" style="height:42px; margin:0; line-height:42px; background:#666; text-decoration:none;">RESET</a>
     </form>
 
     <h3>Lista Użytkowników (Znaleziono: <?php echo count($users); ?>)</h3>
-    <table>
+    <table style="border-collapse: collapse; width: 100%;">
         <tr>
             <th>ID</th>
             <th>Dane Użytkownika</th>
@@ -152,7 +143,7 @@ $users = $stmt->fetchAll();
             <th>Akcje</th>
         </tr>
         <?php foreach ($users as $u): ?>
-            <tr>
+            <tr style="border-bottom: 1px solid #ddd;">
                 <td><?php echo $u['id_uzytkownika']; ?></td>
                 <td>
                     <b><?php echo $u['imie'] . ' ' . $u['nazwisko']; ?></b><br>
@@ -162,7 +153,7 @@ $users = $stmt->fetchAll();
                 
                 <td>
                     <?php if($u['rola'] == 'manager'): ?>
-                        <form method='POST' style='display:flex; gap:5px;'>
+                        <form method='POST' style='display:flex; gap:5px; align-items:center; margin:0;'>
                             <input type='hidden' name='user_id' value='<?php echo $u['id_uzytkownika']; ?>'>
                             <select name='hotel_id' style='padding:2px; margin:0; font-size:11px; width:120px;'>
                                 <option value='NULL'>-- Brak --</option>
@@ -171,7 +162,7 @@ $users = $stmt->fetchAll();
                                     echo "<option value='{$h['hotel_id']}' $sel>{$h['nazwa']}</option>";
                                 endforeach; ?>
                             </select>
-                            <button name='assign_hotel' class='btn' style='padding:2px 5px; font-size:10px;'>OK</button>
+                            <button name='assign_hotel' class='btn' style='padding:2px 5px; font-size:10px; margin:0;'>OK</button>
                         </form>
                     <?php else: echo "-"; endif; ?>
                 </td>
@@ -184,22 +175,28 @@ $users = $stmt->fetchAll();
                     <?php endif; ?>
                 </td>
                 
-                <td style="display:flex; gap:5px;">
-                    <?php if ($u['rola'] != 'admin'): ?>
-                        <form method='POST'>
-                            <input type='hidden' name='toggle_block_id' value='<?php echo $u['id_uzytkownika']; ?>'>
-                            <?php if($u['czy_zablokowany']): ?>
-                                <button class='btn' style='background:green; padding:5px 10px; font-size:11px;'>Odblokuj</button>
-                            <?php else: ?>
-                                <button class='btn' style='background:orange; color:black; padding:5px 10px; font-size:11px;'>Zablokuj</button>
-                            <?php endif; ?>
-                        </form>
+                <td style="vertical-align: middle;">
+                    <div style="display:flex; gap:5px; align-items:center;">
+                        <?php if ($u['rola'] != 'admin'): ?>
+                            
+                            <form method='POST' style="margin:0;">
+                                <input type='hidden' name='toggle_block_id' value='<?php echo $u['id_uzytkownika']; ?>'>
+                                <?php if($u['czy_zablokowany']): ?>
+                                    <button class='btn' style='background:green; padding:5px 10px; font-size:11px;'>Odblokuj</button>
+                                <?php else: ?>
+                                    <button class='btn' style='background:orange; color:black; padding:5px 10px; font-size:11px;'>Zablokuj</button>
+                                <?php endif; ?>
+                            </form>
 
-                        <form method='POST' onsubmit='return confirm("Usunąć trwale?");'>
-                            <input type='hidden' name='delete_user_id' value='<?php echo $u['id_uzytkownika']; ?>'>
-                            <button class='btn btn-red' style='padding:5px 10px; font-size:11px;'>Usuń</button>
-                        </form>
-                    <?php else: echo "<b>ADMIN</b>"; endif; ?>
+                            <form method='POST' onsubmit='return confirm("Usunąć trwale?");' style="margin:0;">
+                                <input type='hidden' name='delete_user_id' value='<?php echo $u['id_uzytkownika']; ?>'>
+                                <button class='btn btn-red' style='padding:5px 10px; font-size:11px;'>Usuń</button>
+                            </form>
+
+                        <?php else: ?>
+                            <b>ADMIN</b>
+                        <?php endif; ?>
+                    </div>
                 </td>
             </tr>
         <?php endforeach; ?>
