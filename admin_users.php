@@ -1,35 +1,78 @@
 <?php
 session_start(); include 'db.php';
 
-// Ochrona: Tylko admin
+// Ochrona: Tylko admin ma tu wstęp
 if ($_SESSION['rola'] != 'admin') die("Brak dostępu");
 
-// 1. OBSŁUGA BLOKOWANIA / ODBLOKOWYWANIA
+// Pobranie listy hoteli do formularzy (dla selecta przy tworzeniu managera)
+$hotele = $conn->query("SELECT hotel_id, nazwa FROM hotele")->fetchAll();
+
+// =========================================================
+// 1. OBSŁUGA FORMULARZY (POST - Zapisywanie zmian)
+// =========================================================
+
+// Tworzenie nowego usera
+if (isset($_POST['create_user'])) {
+    try {
+        $hotel_id = ($_POST['rola'] == 'manager' && $_POST['hotel_id'] != 'NULL') ? $_POST['hotel_id'] : NULL;
+        $stmt = $conn->prepare("INSERT INTO uzytkownik (imie, nazwisko, email, haslo, rola, manager_hotel_id) VALUES (?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$_POST['imie'], $_POST['nazwisko'], $_POST['email'], $_POST['haslo'], $_POST['rola'], $hotel_id]);
+        echo "<script>alert('Utworzono nowego użytkownika!');</script>";
+    } catch (Exception $e) { echo "<script>alert('Błąd: Email zajęty!');</script>"; }
+}
+
+// Blokowanie / Odblokowywanie
 if (isset($_POST['toggle_block_id'])) {
-    $stmt = $conn->prepare("UPDATE uzytkownik SET czy_zablokowany = NOT czy_zablokowany WHERE id_uzytkownika = ?");
-    $stmt->execute([$_POST['toggle_block_id']]);
+    $conn->prepare("UPDATE uzytkownik SET czy_zablokowany = NOT czy_zablokowany WHERE id_uzytkownika = ?")->execute([$_POST['toggle_block_id']]);
 }
 
-// 2. OBSŁUGA USUWANIA
+// Usuwanie
 if (isset($_POST['delete_user_id'])) {
-    $stmt = $conn->prepare("DELETE FROM uzytkownik WHERE id_uzytkownika = ?");
-    $stmt->execute([$_POST['delete_user_id']]);
+    $conn->prepare("DELETE FROM uzytkownik WHERE id_uzytkownika = ?")->execute([$_POST['delete_user_id']]);
 }
 
-// 3. PRZYPISANIE MANAGERA DO HOTELU (NOWOŚĆ)
+// Zmiana hotelu managera
 if (isset($_POST['assign_hotel'])) {
-    $uid = $_POST['user_id'];
-    $hid = $_POST['hotel_id'];
-    // Jeśli wybrano "Brak" (value="NULL"), ustawiamy NULL w bazie
-    if($hid == "NULL") $hid = null;
-    
-    $stmt = $conn->prepare("UPDATE uzytkownik SET manager_hotel_id = ? WHERE id_uzytkownika = ?");
-    $stmt->execute([$hid, $uid]);
+    $hid = ($_POST['hotel_id'] == "NULL") ? NULL : $_POST['hotel_id'];
+    $conn->prepare("UPDATE uzytkownik SET manager_hotel_id = ? WHERE id_uzytkownika = ?")->execute([$hid, $_POST['user_id']]);
     echo "<script>alert('Zaktualizowano przypisanie hotelu!');</script>";
 }
 
-// Pobranie listy hoteli do dropdowna
-$hotele = $conn->query("SELECT hotel_id, nazwa FROM hotele")->fetchAll();
+// =========================================================
+// 2. LOGIKA WYSZUKIWANIA (GET - Filtrowanie)
+// =========================================================
+$where = "1=1"; // Domyślnie pokaż wszystko
+$params = [];
+
+// A. Szukanie po tekście (Imie, Nazwisko, Email)
+if (!empty($_GET['q'])) {
+    $where .= " AND (imie ILIKE ? OR nazwisko ILIKE ? OR email ILIKE ?)";
+    $txt = "%" . $_GET['q'] . "%";
+    $params[] = $txt; $params[] = $txt; $params[] = $txt;
+}
+
+// B. Filtrowanie po Roli
+if (!empty($_GET['r'])) {
+    $where .= " AND rola = ?";
+    $params[] = $_GET['r'];
+}
+
+// C. Filtrowanie po Statusie (Aktywny / Zablokowany)
+if (!empty($_GET['s'])) {
+    if($_GET['s'] == 'blocked') $where .= " AND czy_zablokowany = TRUE";
+    if($_GET['s'] == 'active')  $where .= " AND czy_zablokowany = FALSE";
+}
+
+// Główne zapytanie z filtrami
+$sql = "SELECT u.*, h.nazwa as hotel_nazwa 
+        FROM uzytkownik u 
+        LEFT JOIN hotele h ON u.manager_hotel_id = h.hotel_id 
+        WHERE $where 
+        ORDER BY u.id_uzytkownika DESC";
+        
+$stmt = $conn->prepare($sql);
+$stmt->execute($params);
+$users = $stmt->fetchAll();
 ?>
 <!DOCTYPE html>
 <html>
@@ -42,69 +85,124 @@ $hotele = $conn->query("SELECT hotel_id, nazwa FROM hotele")->fetchAll();
 </div>
 
 <div class="box" style="max-width:1100px;">
-    <h3>Lista Użytkowników</h3>
+    
+    <div style="background: #eef; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ccd;">
+        <h3 style="margin-top:0;">+ Stwórz Nowe Konto</h3>
+        <form method="POST" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+            <div style="flex:1"><label style="font-size:12px;">Imię</label><input type="text" name="imie" required style="margin:0"></div>
+            <div style="flex:1"><label style="font-size:12px;">Nazwisko</label><input type="text" name="nazwisko" required style="margin:0"></div>
+            <div style="flex:1"><label style="font-size:12px;">Email</label><input type="email" name="email" required style="margin:0"></div>
+            <div style="width:100px"><label style="font-size:12px;">Hasło</label><input type="text" name="haslo" value="1234" required style="margin:0"></div>
+            <div style="width:120px">
+                <label style="font-size:12px;">Rola</label>
+                <select name="rola" style="margin:0">
+                    <option value="klient">Klient</option>
+                    <option value="manager">Manager</option>
+                    <option value="admin">Admin</option>
+                </select>
+            </div>
+            <div style="width:180px">
+                <label style="font-size:12px;">Hotel (dla Managera)</label>
+                <select name="hotel_id" style="margin:0">
+                    <option value="NULL">-- Brak --</option>
+                    <?php foreach($hotele as $h): echo "<option value='{$h['hotel_id']}'>{$h['nazwa']}</option>"; endforeach; ?>
+                </select>
+            </div>
+            <button name="create_user" class="btn btn-green" style="height:42px; margin:0;">Stwórz</button>
+        </form>
+    </div>
+
+    <form method="GET" style="background: #003580; padding: 15px; border-radius: 8px; display: flex; gap: 10px; align-items: flex-end; margin-bottom: 20px;">
+        <div style="flex:1;">
+            <label style="color:white; font-size:12px;">Szukaj (Email, Imię, Nazwisko):</label>
+            <input type="text" name="q" value="<?php echo $_GET['q'] ?? ''; ?>" placeholder="Wpisz frazę..." style="margin:0;">
+        </div>
+        
+        <div style="width:150px;">
+            <label style="color:white; font-size:12px;">Filtruj Rolę:</label>
+            <select name="r" style="margin:0;">
+                <option value="">Wszyscy</option>
+                <option value="klient" <?php if(($_GET['r']??'')=='klient') echo 'selected'; ?>>Klienci</option>
+                <option value="manager" <?php if(($_GET['r']??'')=='manager') echo 'selected'; ?>>Managerowie</option>
+                <option value="admin" <?php if(($_GET['r']??'')=='admin') echo 'selected'; ?>>Admini</option>
+            </select>
+        </div>
+
+        <div style="width:150px;">
+            <label style="color:white; font-size:12px;">Status:</label>
+            <select name="s" style="margin:0;">
+                <option value="">Wszystkie</option>
+                <option value="active" <?php if(($_GET['s']??'')=='active') echo 'selected'; ?>>Aktywni</option>
+                <option value="blocked" <?php if(($_GET['s']??'')=='blocked') echo 'selected'; ?>>Zablokowani</option>
+            </select>
+        </div>
+
+        <button class="btn btn-green" style="height:42px; margin:0;">SZUKAJ</button>
+        <a href="admin_users.php" class="btn" style="height:42px; margin:0; line-height:42px; background:#666; text-decoration:none;">RESET</a>
+    </form>
+
+    <h3>Lista Użytkowników (Znaleziono: <?php echo count($users); ?>)</h3>
     <table>
         <tr>
             <th>ID</th>
-            <th>Użytkownik</th>
+            <th>Dane Użytkownika</th>
             <th>Rola</th>
-            <th>Zarządza Hotelem (Dla Managera)</th> <th>Status</th>
+            <th>Przypisany Hotel</th>
+            <th>Status</th>
             <th>Akcje</th>
         </tr>
-        <?php
-        // Pobieramy użytkowników + nazwę hotelu którym zarządzają (LEFT JOIN)
-        $sql = "SELECT u.*, h.nazwa as hotel_nazwa 
-                FROM uzytkownik u 
-                LEFT JOIN hotele h ON u.manager_hotel_id = h.hotel_id 
-                ORDER BY u.id_uzytkownika ASC";
-        $users = $conn->query($sql);
-        
-        while ($u = $users->fetch(PDO::FETCH_ASSOC)) {
-            // Status wizualny
-            if ($u['czy_zablokowany']) {
-                $status_text = "<span style='color:red; font-weight:bold'>ZABLOKOWANY</span>";
-                $btn_text = "Odblokuj"; $btn_color = "background: green;";
-            } else {
-                $status_text = "<span style='color:green'>Aktywny</span>";
-                $btn_text = "Zablokuj"; $btn_color = "background: orange; color: black;";
-            }
+        <?php foreach ($users as $u): ?>
+            <tr>
+                <td><?php echo $u['id_uzytkownika']; ?></td>
+                <td>
+                    <b><?php echo $u['imie'] . ' ' . $u['nazwisko']; ?></b><br>
+                    <small><?php echo $u['email']; ?></small>
+                </td>
+                <td><span style="text-transform:uppercase; font-weight:bold; font-size:0.9em;"><?php echo $u['rola']; ?></span></td>
+                
+                <td>
+                    <?php if($u['rola'] == 'manager'): ?>
+                        <form method='POST' style='display:flex; gap:5px;'>
+                            <input type='hidden' name='user_id' value='<?php echo $u['id_uzytkownika']; ?>'>
+                            <select name='hotel_id' style='padding:2px; margin:0; font-size:11px; width:120px;'>
+                                <option value='NULL'>-- Brak --</option>
+                                <?php foreach($hotele as $h): 
+                                    $sel = ($u['manager_hotel_id'] == $h['hotel_id']) ? 'selected' : '';
+                                    echo "<option value='{$h['hotel_id']}' $sel>{$h['nazwa']}</option>";
+                                endforeach; ?>
+                            </select>
+                            <button name='assign_hotel' class='btn' style='padding:2px 5px; font-size:10px;'>OK</button>
+                        </form>
+                    <?php else: echo "-"; endif; ?>
+                </td>
 
-            echo "<tr>";
-            echo "<td>{$u['id_uzytkownika']}</td>";
-            echo "<td>{$u['imie']} {$u['nazwisko']}<br><small>{$u['email']}</small></td>";
-            echo "<td><b>{$u['rola']}</b></td>";
-            
-            // KOLUMNA PRZYPISYWANIA HOTELU
-            echo "<td>";
-            if($u['rola'] == 'manager') {
-                echo "<form method='POST' style='display:flex; gap:5px;'>
-                        <input type='hidden' name='user_id' value='{$u['id_uzytkownika']}'>
-                        <select name='hotel_id' style='padding:5px; margin:0;'>
-                            <option value='NULL'>-- Brak --</option>";
-                            foreach($hotele as $h) {
-                                $selected = ($u['manager_hotel_id'] == $h['hotel_id']) ? 'selected' : '';
-                                echo "<option value='{$h['hotel_id']}' $selected>{$h['nazwa']}</option>";
-                            }
-                echo   "</select>
-                        <button name='assign_hotel' class='btn' style='padding:5px; font-size:12px;'>Zapisz</button>
-                      </form>";
-            } else {
-                echo "<span style='color:#ccc'>-</span>";
-            }
-            echo "</td>";
+                <td>
+                    <?php if($u['czy_zablokowany']): ?>
+                        <b style="color:red">ZABLOKOWANY</b>
+                    <?php else: ?>
+                        <span style="color:green">Aktywny</span>
+                    <?php endif; ?>
+                </td>
+                
+                <td style="display:flex; gap:5px;">
+                    <?php if ($u['rola'] != 'admin'): ?>
+                        <form method='POST'>
+                            <input type='hidden' name='toggle_block_id' value='<?php echo $u['id_uzytkownika']; ?>'>
+                            <?php if($u['czy_zablokowany']): ?>
+                                <button class='btn' style='background:green; padding:5px 10px; font-size:11px;'>Odblokuj</button>
+                            <?php else: ?>
+                                <button class='btn' style='background:orange; color:black; padding:5px 10px; font-size:11px;'>Zablokuj</button>
+                            <?php endif; ?>
+                        </form>
 
-            echo "<td>$status_text</td>";
-            
-            echo "<td style='display:flex; gap:5px;'>";
-            if ($u['rola'] != 'admin') {
-                echo "<form method='POST'><input type='hidden' name='toggle_block_id' value='{$u['id_uzytkownika']}'><button class='btn' style='$btn_color padding:5px 10px; font-size:12px;'>$btn_text</button></form>";
-                echo "<form method='POST' onsubmit='return confirm(\"Usunąć?\");'><input type='hidden' name='delete_user_id' value='{$u['id_uzytkownika']}'><button class='btn btn-red' style='padding:5px 10px; font-size:12px;'>Usuń</button></form>";
-            } else {
-                echo "ADMIN";
-            }
-            echo "</td></tr>";
-        }
-        ?>
+                        <form method='POST' onsubmit='return confirm("Usunąć trwale?");'>
+                            <input type='hidden' name='delete_user_id' value='<?php echo $u['id_uzytkownika']; ?>'>
+                            <button class='btn btn-red' style='padding:5px 10px; font-size:11px;'>Usuń</button>
+                        </form>
+                    <?php else: echo "<b>ADMIN</b>"; endif; ?>
+                </td>
+            </tr>
+        <?php endforeach; ?>
     </table>
 </div>
 
